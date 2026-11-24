@@ -1,4 +1,4 @@
-# MR Social Downloader
+# MR Downloader
 
 A container-based web app that streams public social videos directly to the requesting device. Downloaded media is not intentionally written to application storage.
 
