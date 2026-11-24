@@ -36,3 +36,21 @@ Open http://localhost:3000. For local Node.js execution, install Node 20+ and yt
 ## Next steps
 
 Deploy the container API with HTTPS, then configure an iOS Shortcut to POST the shared URL to `/api/download` and save the response to Photos. Add integration tests and shared rate limiting before opening the service publicly.
+
+## GitHub Actions + GitHub Container Registry
+
+The workflow at `.github/workflows/docker-publish.yml` builds the Docker image on every push to `main` and publishes it to:
+
+`ghcr.io/boombo444555-prog/mr-social-downloader:latest`
+
+It also creates a commit-SHA image tag. Pull requests build the image without publishing it. The workflow uses the repository-provided `GITHUB_TOKEN`; no personal access token is required. Ensure Actions are enabled for the repository and the workflow has permission to write packages. After the first successful publish, set the container package visibility to Public in GitHub Packages if you want anyone to pull it without authenticating.
+
+## Run the published image with Docker Compose
+
+```bash
+cp .env.example .env
+docker compose pull
+docker compose up -d
+```
+
+Then open `http://localhost:3000`. To update after a new image is published, run `docker compose pull && docker compose up -d`.

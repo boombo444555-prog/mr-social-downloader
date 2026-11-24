@@ -1,0 +1,9 @@
+services:
+  mr-social:
+    image: ghcr.io/boombo444555-prog/mr-social-downloader:latest
+    container_name: mr-social-downloader
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
