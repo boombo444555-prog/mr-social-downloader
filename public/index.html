@@ -23,7 +23,4 @@
 </div>
 </section></main>
 <footer>© <span id="year"></span> MR Downloader · Videos are streamed, not stored.</footer>
-<script>
-const form=document.querySelector('#form'),input=document.querySelector('#url'),button=document.querySelector('#submit'),status=document.querySelector('#status');document.querySelector('#year').textContent=new Date().getFullYear();
-form.addEventListener('submit',async e=>{e.preventDefault();const url=input.value.trim();if(!url)return;button.disabled=true;button.textContent='Preparing…';status.className='status';status.textContent='Connecting to the source…';try{const response=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});if(!response.ok){let data={};try{data=await response.json()}catch{}throw new Error(data.error||'Download failed. Please try another link.')}status.textContent='Downloading your video…';const blob=await response.blob(),objectUrl=URL.createObjectURL(blob),a=document.createElement('a');a.href=objectUrl;a.download='mr-social-video.mp4';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);status.className='status success';status.textContent='Your download is ready.'}catch(err){status.className='status error';status.textContent=err.message||'Something went wrong.'}finally{button.disabled=false;button.textContent='Download video ↗'}});
-</script></body></html>
+<script src="/app.js" defer></script></body></html>
