@@ -73,8 +73,8 @@ app.post('/api/download', limit, (req, res) => {
   child.stdout.once('data', () => {
     started = true;
     res.status(200).set({
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': 'attachment; filename="mr-social-video"',
+      'Content-Type': 'video/mp4',
+      'Content-Disposition': 'attachment; filename="mr-downloader-video.mp4"',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff'
     });
