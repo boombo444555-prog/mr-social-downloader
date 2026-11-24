@@ -44,8 +44,8 @@ function validateUrl(value) {
   try { parsed = new URL(value); } catch { throw new Error('Please enter a valid video link.'); }
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only HTTP and HTTPS links are supported.');
   if (parsed.username || parsed.password) throw new Error('Links containing credentials are not allowed.');
-  const host = parsed.hostname.toLowerCase().replace(/^www\\./, '');
-  if (!allowedHosts.some(domain => host === domain || host.endsWith(`.\\${domain}`))) {
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  if (!allowedHosts.some(domain => host === domain || host.endsWith('.' + domain))) {
     throw new Error('This platform is not enabled yet.');
   }
   return parsed.toString();
