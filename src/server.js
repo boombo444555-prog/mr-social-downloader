@@ -2,7 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, stat, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, stat, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const ytdlp = process.env.YTDLP_PATH || 'yt-dlp';
+const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
 const allowedHosts = (process.env.ALLOWED_HOSTS || 'tiktok.com,instagram.com,facebook.com,fb.watch,twitter.com,x.com,pinterest.com,pin.it,reddit.com,redd.it,threads.net')
   .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 8);
@@ -60,7 +61,6 @@ app.post('/api/download', limit, async (req, res) => {
 
   let tempDir;
   let child;
-  let timedOut = false;
   const cleanupTemp = async () => {
     if (tempDir) {
       const dir = tempDir;
@@ -68,44 +68,101 @@ app.post('/api/download', limit, async (req, res) => {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   };
-  try {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), 'mr-downloader-'));
-    const outputPath = path.join(tempDir, 'video.mp4');
-    const args = [
-      '--no-playlist', '--no-warnings', '--no-progress', '--restrict-filenames',
-      '--format', 'bestvideo*+bestaudio/best',
-      '--merge-output-format', 'mp4',
-      '--output', outputPath,
-      '--', url
-    ];
 
-    child = spawn(ytdlp, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  // Run yt-dlp and FFmpeg with a timeout, while stopping work if the client disconnects.
+  const runProcess = (command, args, timeoutMs) => new Promise((resolve, reject) => {
     let stderr = '';
-    child.stderr.on('data', chunk => {
+    let timedOut = false;
+    const proc = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    child = proc;
+    proc.stderr.on('data', chunk => {
       if (stderr.length < 12000) stderr += chunk.toString();
     });
-
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
-    }, Number(process.env.DOWNLOAD_TIMEOUT_MS || 180000));
+      proc.kill('SIGKILL');
+    }, timeoutMs);
+    const onResponseClose = () => {
+      if (!res.writableEnded && proc.exitCode === null) proc.kill('SIGTERM');
+    };
+    res.once('close', onResponseClose);
+    proc.once('error', error => {
+      clearTimeout(timeout);
+      res.off('close', onResponseClose);
+      if (child === proc) child = null;
+      reject(error);
+    });
+    proc.once('close', code => {
+      clearTimeout(timeout);
+      res.off('close', onResponseClose);
+      if (child === proc) child = null;
+      resolve({ code, stderr, timedOut });
+    });
+  });
 
-    const exitCode = await new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', resolve);
-      res.once('close', () => {
-        if (!res.writableEnded && child && child.exitCode === null) child.kill('SIGTERM');
-      });
-    }).finally(() => clearTimeout(timeout));
+  try {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), 'mr-downloader-'));
+    const sourceTemplate = path.join(tempDir, 'source.%(ext)s');
+    const outputPath = path.join(tempDir, 'video.mp4');
+    const downloadTimeout = Number(process.env.DOWNLOAD_TIMEOUT_MS || 180000);
+    const transcodeTimeout = Number(process.env.TRANSCODE_TIMEOUT_MS || 300000);
+
+    const download = await runProcess(ytdlp, [
+      '--no-playlist', '--no-warnings', '--no-progress', '--restrict-filenames',
+      '--format', 'bestvideo*+bestaudio/best',
+      '--merge-output-format', 'mkv',
+      '--output', sourceTemplate,
+      '--', url
+    ], downloadTimeout);
 
     if (res.destroyed) { await cleanupTemp(); return; }
-    if (timedOut) { await cleanupTemp(); return res.status(504).json({ error: 'The download took too long. Please try again.' }); }
-    if (exitCode !== 0) {
+    if (download.timedOut) {
       await cleanupTemp();
-      const needsLogin = /private|login|sign in|authentication/i.test(stderr);
+      return res.status(504).json({ error: 'The download took too long. Please try again.' });
+    }
+    if (download.code !== 0) {
+      await cleanupTemp();
+      const needsLogin = /private|login|sign in|authentication/i.test(download.stderr);
       return res.status(422).json({ error: needsLogin
         ? 'This link may require login or may not be publicly accessible.'
         : 'Could not download this link. It may be unavailable or unsupported.' });
+    }
+
+    const files = await readdir(tempDir, { withFileTypes: true });
+    const sourceFile = files.find(entry =>
+      entry.isFile() &&
+      /^source\.(mp4|mkv|webm|mov|m4v|flv|3gp|ts|avi)$/i.test(entry.name)
+    );
+    if (!sourceFile) {
+      await cleanupTemp();
+      return res.status(422).json({ error: 'The source did not return a playable video.' });
+    }
+
+    // Always normalize the actual codecs/container, not just the file extension.
+    const conversion = await runProcess(ffmpeg, [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', path.join(tempDir, sourceFile.name),
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-sn', '-dn',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-preset', process.env.FFMPEG_PRESET || 'veryfast',
+      '-crf', process.env.FFMPEG_CRF || '23',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart',
+      '-f', 'mp4',
+      outputPath
+    ], transcodeTimeout);
+
+    if (res.destroyed) { await cleanupTemp(); return; }
+    if (conversion.timedOut) {
+      await cleanupTemp();
+      return res.status(504).json({ error: 'Video conversion took too long. Please try again.' });
+    }
+    if (conversion.code !== 0) {
+      console.error('[MR Downloader] FFmpeg conversion failed:', conversion.stderr.slice(-3000));
+      await cleanupTemp();
+      return res.status(422).json({ error: 'The downloaded video could not be converted to a compatible MP4.' });
     }
 
     const info = await stat(outputPath);
@@ -130,6 +187,7 @@ app.post('/api/download', limit, async (req, res) => {
     res.once('close', cleanup);
     createReadStream(outputPath).pipe(res);
   } catch (error) {
+    console.error('[MR Downloader] Request failed:', error.message);
     if (!res.headersSent && !res.destroyed) {
       res.status(503).json({ error: 'Download service could not complete the request. Please try again.' });
     } else if (!res.destroyed) {
@@ -144,4 +202,4 @@ app.use((error, _req, res, _next) => {
   else res.destroy(error);
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`MR Downloader listening on :${port}`));
+app.listen(port, '0.0.0.0', () => console.log(\`MR Downloader listening on :\${port}\`));
