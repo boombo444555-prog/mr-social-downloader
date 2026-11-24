@@ -1,6 +1,9 @@
 import express from 'express';
 import helmet from 'helmet';
 import { spawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, stat, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,7 +23,6 @@ app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(dirname, '..', 'public')));
 
 function keyFor(req) {
-  // Enable only behind a reverse proxy you control.
   return process.env.TRUST_PROXY === '1'
     ? String(req.headers['x-forwarded-for'] || req.socket.remoteAddress).split(',')[0].trim()
     : req.socket.remoteAddress || 'unknown';
@@ -42,8 +44,8 @@ function validateUrl(value) {
   try { parsed = new URL(value); } catch { throw new Error('Please enter a valid video link.'); }
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only HTTP and HTTPS links are supported.');
   if (parsed.username || parsed.password) throw new Error('Links containing credentials are not allowed.');
-  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-  if (!allowedHosts.some(domain => host === domain || host.endsWith(`.${domain}`))) {
+  const host = parsed.hostname.toLowerCase().replace(/^www\\./, '');
+  if (!allowedHosts.some(domain => host === domain || host.endsWith(`.\\${domain}`))) {
     throw new Error('This platform is not enabled yet.');
   }
   return parsed.toString();
@@ -51,52 +53,81 @@ function validateUrl(value) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'MR Downloader' }));
 
-app.post('/api/download', limit, (req, res) => {
+app.post('/api/download', limit, async (req, res) => {
   let url;
   try { url = validateUrl(req.body?.url); }
   catch (error) { return res.status(400).json({ error: error.message }); }
 
-  const args = ['--no-playlist', '--no-warnings', '--no-progress', '--restrict-filenames',
-    '--format', 'best[ext=mp4]/best', '--output', '-', '--', url];
-  const child = spawn(ytdlp, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  let stderr = '';
-  let started = false;
-  let closed = false;
-  const timeout = setTimeout(() => child.kill('SIGKILL'), Number(process.env.DOWNLOAD_TIMEOUT_MS || 180000));
+  let tempDir;
+  let child;
+  let timedOut = false;
+  try {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), 'mr-downloader-'));
+    const outputPath = path.join(tempDir, 'video.mp4');
+    const args = [
+      '--no-playlist', '--no-warnings', '--no-progress', '--restrict-filenames',
+      '--format', 'bestvideo*+bestaudio/best',
+      '--merge-output-format', 'mp4',
+      '--output', outputPath,
+      '--', url
+    ];
 
-  child.stderr.on('data', chunk => { if (stderr.length < 12000) stderr += chunk.toString(); });
-  child.once('error', error => {
-    clearTimeout(timeout);
-    if (!res.headersSent) res.status(503).json({ error: 'Download engine is unavailable. Please try again later.' });
-    else res.destroy(error);
-  });
-  child.stdout.once('data', () => {
-    started = true;
+    child = spawn(ytdlp, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let stderr = '';
+    child.stderr.on('data', chunk => {
+      if (stderr.length < 12000) stderr += chunk.toString();
+    });
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, Number(process.env.DOWNLOAD_TIMEOUT_MS || 180000));
+
+    const exitCode = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+      res.once('close', () => {
+        if (!res.writableEnded && child && child.exitCode === null) child.kill('SIGTERM');
+      });
+    }).finally(() => clearTimeout(timeout));
+
+    if (res.destroyed) return;
+    if (timedOut) return res.status(504).json({ error: 'The download took too long. Please try again.' });
+    if (exitCode !== 0) {
+      const needsLogin = /private|login|sign in|authentication/i.test(stderr);
+      return res.status(422).json({ error: needsLogin
+        ? 'This link may require login or may not be publicly accessible.'
+        : 'Could not download this link. It may be unavailable or unsupported.' });
+    }
+
+    const info = await stat(outputPath);
+    if (!info.isFile() || info.size === 0) {
+      return res.status(422).json({ error: 'The source did not return a playable video.' });
+    }
+
     res.status(200).set({
       'Content-Type': 'video/mp4',
       'Content-Disposition': 'attachment; filename="mr-downloader-video.mp4"',
+      'Content-Length': String(info.size),
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff'
     });
-  });
-  child.stdout.on('data', chunk => { if (!res.destroyed) res.write(chunk); });
-  child.stdout.on('end', () => { if (!res.destroyed) res.end(); });
-  child.on('close', code => {
-    closed = true;
-    clearTimeout(timeout);
-    if (!started && !res.headersSent) {
-      const needsLogin = /private|login|sign in|authentication/i.test(stderr);
-      res.status(422).json({ error: needsLogin
-        ? 'This link may require login or may not be publicly accessible.'
-        : 'Could not download this link. It may be unavailable or unsupported.' });
-    } else if (code !== 0 && !res.destroyed) {
-      res.destroy(new Error('Download process failed.'));
+
+    const cleanup = () => {
+      if (tempDir) rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      tempDir = null;
+    };
+    res.once('finish', cleanup);
+    res.once('close', cleanup);
+    createReadStream(outputPath).pipe(res);
+  } catch (error) {
+    if (!res.headersSent && !res.destroyed) {
+      res.status(503).json({ error: 'Download service could not complete the request. Please try again.' });
+    } else if (!res.destroyed) {
+      res.destroy(error);
     }
-  });
-  res.on('close', () => {
-    if (!closed) child.kill('SIGTERM');
-    clearTimeout(timeout);
-  });
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 app.use((error, _req, res, _next) => {
