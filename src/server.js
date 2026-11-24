@@ -202,4 +202,4 @@ app.use((error, _req, res, _next) => {
   else res.destroy(error);
 });
 
-app.listen(port, '0.0.0.0', () => console.log(\`MR Downloader listening on :${port}\`));
+app.listen(port, '0.0.0.0', () => console.log('MR Downloader listening on :' + port));
