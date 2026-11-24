@@ -49,7 +49,7 @@ function validateUrl(value) {
   return parsed.toString();
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'MR Social Downloader' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'MR Downloader' }));
 
 app.post('/api/download', limit, (req, res) => {
   let url;
@@ -104,4 +104,4 @@ app.use((error, _req, res, _next) => {
   else res.destroy(error);
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`MR Social Downloader listening on :${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`MR Downloader listening on :${port}`));
