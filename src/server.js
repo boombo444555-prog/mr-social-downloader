@@ -70,11 +70,11 @@ app.post('/api/download', limit, async (req, res) => {
   };
   try {
     tempDir = await mkdtemp(path.join(os.tmpdir(), 'mr-downloader-'));
-    const outputPath = path.join(tempDir, 'video.mov');
+    const outputPath = path.join(tempDir, 'video.mp4');
     const args = [
       '--no-playlist', '--no-warnings', '--no-progress', '--restrict-filenames',
       '--format', 'bestvideo*+bestaudio/best',
-      '--merge-output-format', 'mov', '--remux-video', 'mov',
+      '--merge-output-format', 'mp4',
       '--output', outputPath,
       '--', url
     ];
@@ -115,8 +115,8 @@ app.post('/api/download', limit, async (req, res) => {
     }
 
     res.status(200).set({
-      'Content-Type': 'video/quicktime',
-      'Content-Disposition': 'attachment; filename="mr-downloader-video.mov"',
+      'Content-Type': 'video/mp4',
+      'Content-Disposition': 'attachment; filename="mr-downloader-video.mp4"',
       'Content-Length': String(info.size),
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff'
