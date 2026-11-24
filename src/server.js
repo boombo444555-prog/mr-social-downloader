@@ -61,6 +61,13 @@ app.post('/api/download', limit, async (req, res) => {
   let tempDir;
   let child;
   let timedOut = false;
+  const cleanupTemp = async () => {
+    if (tempDir) {
+      const dir = tempDir;
+      tempDir = null;
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  };
   try {
     tempDir = await mkdtemp(path.join(os.tmpdir(), 'mr-downloader-'));
     const outputPath = path.join(tempDir, 'video.mp4');
@@ -91,9 +98,10 @@ app.post('/api/download', limit, async (req, res) => {
       });
     }).finally(() => clearTimeout(timeout));
 
-    if (res.destroyed) return;
-    if (timedOut) return res.status(504).json({ error: 'The download took too long. Please try again.' });
+    if (res.destroyed) { await cleanupTemp(); return; }
+    if (timedOut) { await cleanupTemp(); return res.status(504).json({ error: 'The download took too long. Please try again.' }); }
     if (exitCode !== 0) {
+      await cleanupTemp();
       const needsLogin = /private|login|sign in|authentication/i.test(stderr);
       return res.status(422).json({ error: needsLogin
         ? 'This link may require login or may not be publicly accessible.'
@@ -102,6 +110,7 @@ app.post('/api/download', limit, async (req, res) => {
 
     const info = await stat(outputPath);
     if (!info.isFile() || info.size === 0) {
+      await cleanupTemp();
       return res.status(422).json({ error: 'The source did not return a playable video.' });
     }
 
